@@ -31,6 +31,9 @@ import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
 
+import net.nuttle.solr6.search.streaming.StreamingCallbackHandler;
+import net.nuttle.solr6.search.streaming.StreamingCallbackHandler.MarkerDocument;
+
 public class SolrSearchLab {
   
   private static final String COL1 = "col1";
@@ -89,50 +92,8 @@ public class SolrSearchLab {
     System.out.println("Docs returned: " + docList.size());
   }
   
-  private static class MarkerDoc extends SolrDocument {}
-  
-  private static class StreamingCallbackHandler extends StreamingResponseCallback {
-    private BlockingQueue<SolrDocument> queue;
-    private long currentPosition;
-    private long numFound;
-    
-    public StreamingCallbackHandler(BlockingQueue<SolrDocument> queue) {
-      this.queue = queue;
-    }
-    /**
-     * Apparently this method is called *before* streaming begins
-     * @param numFound
-     * @param start
-     * @param maxScore
-     */
-    @Override
-    public void streamDocListInfo(long numFound, long start, Float maxScore) {
-      this.currentPosition = start;
-      this.numFound = numFound;
-      if (numFound == 0) {
-        //No docs were returned, so just add the marker doc
-        queue.add(new MarkerDoc());
-      }
-    }
-    
-    @Override
-    public void streamSolrDocument(SolrDocument doc) {
-      currentPosition++;
-      //The add method is non-blocking in a BlockingQueue; if capacity limit is violated
-      //an exception is thrown.  So it is important that no limit is set for the queue.
-      queue.add(doc);
-      //This could be customized; we might pass the number of documents to be returned,
-      //which might be less than total possible matches, but we still want to stream
-      //the results.
-      if (currentPosition == numFound) {
-        //All "real" documents have been added, so now add marker doc to indicate end of queue
-        queue.add(new MarkerDoc());
-      }
-    }
-  }
-  
   /**
-   * Here is an example using the above.
+   * An example of a streaming request using a BlockingQueue
    * @throws Exception
    */
   private static void queryAndStreamResponse2(SolrClient client) throws Exception {
@@ -149,6 +110,16 @@ public class SolrSearchLab {
     //it would block adding more until capacity was available.
     //Note that ArrayBlockingQueue is another implementation, but all of its
     //constructors require that capacity value be set.  So LinkedBlockingQueue it is.
+    //If we wanted to limit the number of documents to a specific number, and we were 
+    //confident that there would be at least that many matches, we might use
+    //ArrayBlockingQueue, but this would still set aside memory for the entire number
+    //at once, so if the number is large, LinkedBlockingQueue is probably still better.
+    //However this means that items in the queue should be pulled out about as fast as they 
+    //are put in, or again, runaway memory usage.  If the items are taken out in batches
+    //and processed in calls that can themselves be blocked, such as http calls, this 
+    //can turn into a logjam.
+    //Our use case is to get product ids and write them straight to a file.  There is little
+    //concern that this will be blocked, unless HDFS becomes unavailable.
     BlockingQueue<SolrDocument> queue = new LinkedBlockingQueue<>();
     StreamingCallbackHandler handler = new StreamingCallbackHandler(queue);
     client.queryAndStreamResponse(params, handler);
@@ -160,10 +131,10 @@ public class SolrSearchLab {
      */
     do {
       doc = queue.take();
-      if (!(doc instanceof MarkerDoc)) {
+      if (!(doc instanceof MarkerDocument)) {
         count++;
       }
-    } while (!(doc instanceof MarkerDoc));
+    } while (!(doc instanceof MarkerDocument));
     System.out.println("Matches found: " + count);
   }
   
